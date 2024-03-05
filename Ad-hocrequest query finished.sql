@@ -1,0 +1,145 @@
+select * from dim_campaigns dc ;
+select * from dim_products;
+select * from dim_stores;
+select * from fact_events;
+
+/* Business Requests */
+/* 1. Provide a list of products with a base price greater than 500 and that are featured in promotype of 'BOGOF'
+	  (Buy One Get One Free). This information will help us identify high-valued products that are currently being 
+	  heavily discounted, which can be useful for evaluating our pricing and promotion strategies. */
+	
+	SELECT 	
+		dp.product_name,
+		fe.base_price,
+		fe.promo_type
+	FROM
+		dim_products dp 
+	JOIN
+		fact_events fe 
+	ON dp.product_code = fe.product_code 
+	WHERE	
+		fe.base_price > 500 AND fe.promo_type = 'BOGOF'
+	GROUP BY
+    	dp.product_name, fe.base_price, fe.promo_type;
+		
+/* 2. Generate a report that provides an overview of the number of stores in each city. The results will be stored
+	  in descending order of store counts, allowing us to identify the cities with the highest store presence. The
+	  report includes two essential fields: city and store count, which will assist in optimizing our retail
+	  operations. */
+	
+	SELECT 
+		city,
+		count(store_id) AS 'store count'	
+	FROM
+		dim_stores ds 
+	GROUP BY city 
+	ORDER BY  2 DESC;
+		
+/* 3. Generate a report that displays each campaign along with the total revenue generated before and after the
+      campaign? The report includes three key fields: campaign_name, total_revenue(before_promotion), total_revenue
+      (after_promotion). This report should help in evaluating the financial impact of our promotional campaigns.
+      (Display the value in millions)*/
+
+	SELECT 
+	    dc.campaign_name,
+	    ROUND(SUM(fe.base_price * fe.`quantity_sold(before_promo)`) / 1000000.0, 2) AS "total_revenue(before_promotion)",
+	    ROUND(SUM(
+			case 
+				when promo_type = "50% OFF" then base_price*0.5*fe.`quantity_sold(after_promo)`
+				when promo_type = "25% OFF" then base_price*0.75*fe.`quantity_sold(after_promo)`
+				when promo_type = "33% OFF" then base_price*0.67*fe.`quantity_sold(after_promo)`
+				when promo_type = "500 Cashback" then (base_price-500)*fe.`quantity_sold(after_promo)`
+				when promo_type = "BOGOF" then base_price*0.5*fe.`quantity_sold(after_promo)`*2
+			end
+	    ) / 1000000.0, 2) AS "total_revenue(after_promotion)"
+	FROM 
+	    dim_campaigns dc
+	JOIN
+	    fact_events fe ON dc.campaign_id = fe.campaign_id 
+	GROUP BY 
+	    dc.campaign_name;
+
+/* 4. Produce a report that calculates the Incremental Sold Unit(ISU%) for each category during the Diwali campaign.
+ 	  Additionally, provide rankings for the categories based on their ISU%. This report will include key fields:
+ 	  category, ISU%, and rank order. This information will assist in assessing the category-wise success and impact
+ 	  of the Diwali campaign on Incremental sales.
+ 	  
+ 	  NOTE: ISU%(Incremental Sold Quantity Percentage) is calculated as the percentage increase/decrease in quantity
+ 	  	    sold(after promo) compared to quantity sold(before promo.*/
+	   
+	WITH GroupedCategories AS (
+	    SELECT
+	        dp.category,
+	        ROUND(SUM(
+	            CASE
+	                WHEN fe.promo_type = "BOGOF" THEN fe.`quantity_sold(after_promo)` * 2
+	                ELSE fe.`quantity_sold(after_promo)`
+	            END - fe.`quantity_sold(before_promo)`) / NULLIF(SUM(fe.`quantity_sold(before_promo)`), 0) * 100, 2) AS Total_ISU_Percentage
+	    FROM
+	        dim_products dp
+	    JOIN
+	        fact_events fe ON dp.product_code = fe.product_code
+	    WHERE
+	        fe.campaign_id = (SELECT campaign_id FROM dim_campaigns WHERE campaign_name = 'Diwali')
+	    GROUP BY
+	        dp.category
+	),
+	RankedCategories AS (
+	    SELECT
+	        category,
+	        Total_ISU_Percentage,
+	        RANK() OVER (ORDER BY Total_ISU_Percentage DESC) AS Rank_Order
+	    FROM
+	        GroupedCategories
+	)
+	SELECT
+	    category,
+	    Total_ISU_Percentage,
+	    Rank_Order
+	FROM
+	    RankedCategories;
+		
+/* 5. Create a report featuring the Top 5 products, ranked by Incremental Revenue Percentage(IR%), across all
+      campaigns. The report will provide essential information including product name, category, IR%. This analysis
+      helps identify the most successful products in terms of Incremental revenue across our campaigns, assisting 
+      in product optimization.*/
+	
+	WITH GroupedProducts AS (
+	    SELECT
+	        dp.product_name,
+	        dp.category,
+	        ROUND(SUM(
+	            CASE 
+	                WHEN fe.promo_type = '50% OFF' THEN base_price * 0.5 * fe.`quantity_sold(after_promo)`
+	                WHEN fe.promo_type = '25% OFF' THEN base_price * 0.75 * fe.`quantity_sold(after_promo)`
+	                WHEN fe.promo_type = '33% OFF' THEN base_price * 0.67 * fe.`quantity_sold(after_promo)`
+	                WHEN fe.promo_type = '500 Cashback' THEN (base_price - 500) * fe.`quantity_sold(after_promo)`
+	                WHEN fe.promo_type = 'BOGOF' THEN base_price * 0.5 * fe.`quantity_sold(after_promo)` * 2
+	                ELSE 0
+	            END
+	        ) / 1000000.0, 2) AS Incremental_Revenue_Million,
+	        ROUND(SUM(fe.base_price * fe.`quantity_sold(before_promo)`) / 1000000.0, 2) AS Total_Revenue_Before_Promotion
+	    FROM
+	        dim_products dp
+	    JOIN
+	        fact_events fe ON dp.product_code = fe.product_code
+	    GROUP BY
+	        dp.product_name, dp.category
+	),
+	RankedProducts AS (
+	    SELECT
+	        product_name,
+	        category,
+	        ROUND((Incremental_Revenue_Million - Total_Revenue_Before_Promotion) / NULLIF(Total_Revenue_Before_Promotion, 0) * 100, 2) AS IR_Percentage,
+	        RANK() OVER (ORDER BY (Incremental_Revenue_Million - Total_Revenue_Before_Promotion) / NULLIF(Total_Revenue_Before_Promotion, 0) DESC) AS Rank_Order
+	    FROM
+	        GroupedProducts
+	)
+	SELECT
+	    product_name,
+	    category,
+	    IR_Percentage,
+	    Rank_Order
+	FROM
+	    RankedProducts
+	LIMIT 5;
